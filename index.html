@@ -1,0 +1,781 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Fairlight CMI Tribute</title>
+
+<style>
+html,body{
+    margin:0;
+    overflow:hidden;
+    background:black;
+    color:#00ff00;
+    font-family:monospace;
+}
+
+#toolbar{
+    position:absolute;
+    top:10px;
+    left:10px;
+    z-index:100;
+    background:rgba(0,0,0,0.8);
+    border:1px solid #00ff00;
+    padding:10px;
+}
+
+button,input{
+    background:black;
+    color:#00ff00;
+    border:1px solid #00ff00;
+}
+
+#dropzone{
+    margin-top:5px;
+    padding:5px;
+    border:1px dashed #00ff00;
+}
+</style>
+</head>
+
+<body>
+
+<div id="toolbar">
+    <input type="file" id="fileInput" accept="audio/*"><br><br>
+
+    <button id="playBtn">Play</button>
+
+    <div id="dropzone">
+        Drag MP3 Here
+    </div>
+
+    <div style="margin-top:8px">
+        Slices:
+        <span id="sliceCount">128</span>
+        <br>
+        Mode:
+        <span id="modeDisplay">Classic</span>
+    </div>
+<!--
+    <div id="status">
+        No file loaded
+    </div>
+-->
+</div>
+
+<canvas id="canvas"></canvas>
+
+<script>
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+let w,h;
+
+function resize(){
+    w=canvas.width=window.innerWidth;
+    h=canvas.height=window.innerHeight;
+}
+window.addEventListener("resize",resize);
+resize();
+
+const audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+
+let audioBuffer=null;
+let audioData=null;
+
+let sourceNode=null;
+let startTime=0;
+let playing=false;
+
+let geometry=[];
+
+const SETTINGS = {
+
+    slices: 128,
+    pointsPerSlice: 128,
+
+    verticalScale: 120,
+    depthScale: 12,
+
+    displayMode: "classic",
+
+    //connector spacing
+    // 1 = every point
+    // 2 = every second point
+    // 4 = every fourth point
+    // 8 = sparse
+
+    connectorSpacing: 4
+
+};
+
+const CAMERA = {
+
+    zoom: 1,
+
+    rotX: -0.8,
+    rotY: 0.5,
+
+    panX: 0,
+    panY: 0,
+    panZ: 0
+
+};
+
+
+
+function loadFile(file){
+
+    const reader=new FileReader();
+
+    reader.onload=async function(e){
+
+        const buffer=e.target.result;
+
+        audioBuffer=await audioCtx.decodeAudioData(buffer);
+
+        audioData=audioBuffer.getChannelData(0);
+
+        buildGeometry();
+
+        document.getElementById("status").textContent=
+            file.name+" loaded";
+    };
+
+    reader.readAsArrayBuffer(file);
+}
+
+document.getElementById("fileInput")
+.addEventListener("change",e=>{
+    if(e.target.files.length)
+        loadFile(e.target.files[0]);
+});
+
+const drop=document.getElementById("dropzone");
+
+drop.addEventListener("dragover",e=>{
+    e.preventDefault();
+});
+
+drop.addEventListener("drop",e=>{
+    e.preventDefault();
+
+    if(e.dataTransfer.files.length)
+        loadFile(e.dataTransfer.files[0]);
+});
+
+
+function buildGeometry() {
+
+    geometry = [];
+
+    const total = audioData.length;
+    const sliceSize = Math.floor(total / SETTINGS.slices);
+    const samplesPerPoint = sliceSize / SETTINGS.pointsPerSlice;
+
+    for (let s = 0; s < SETTINGS.slices; s++) {
+
+        const row = [];
+        const sliceStart = s * sliceSize;
+
+        for (let p = 0; p < SETTINGS.pointsPerSlice; p++) {
+
+            const start = Math.floor(sliceStart + p * samplesPerPoint);
+            const end = Math.min(
+                Math.floor(start + samplesPerPoint),
+                total
+            );
+
+            let min = 1;
+            let max = -1;
+            let sum = 0;
+            let count = 0;
+
+            for (let i = start; i < end; i++) {
+
+                const v = audioData[i];
+
+                if (v < min) min = v;
+                if (v > max) max = v;
+
+                sum += v * v;
+                count++;
+
+            }
+
+            const rms = Math.sqrt(sum / Math.max(1, count));
+
+
+		let sumSamples = 0;
+
+		for (let i = start; i < end; i++) {
+
+		    const v = audioData[i];
+
+		    if (v < min) min = v;
+		    if (v > max) max = v;
+
+		    sum += v * v;
+		    sumSamples += v;
+		    count++;
+
+		}
+
+		const average = sumSamples / Math.max(1, count);
+
+            row.push({
+
+                x: (p - SETTINGS.pointsPerSlice/2) * 6,
+
+                y: average * SETTINGS.verticalScale,
+
+                ymin: min * SETTINGS.verticalScale,
+
+                ymax: max * SETTINGS.verticalScale,
+
+                rms: rms * SETTINGS.verticalScale,
+
+                z: s * SETTINGS.depthScale
+
+            });
+
+        }
+
+        geometry.push(row);
+
+    }
+
+}
+
+
+
+
+function rotateX(p,a){
+
+    const c=Math.cos(a);
+    const s=Math.sin(a);
+
+    return {
+        x:p.x,
+        y:p.y*c-p.z*s,
+        z:p.y*s+p.z*c
+    };
+}
+
+function rotateY(p,a){
+
+    const c=Math.cos(a);
+    const s=Math.sin(a);
+
+    return {
+        x:p.x*c+p.z*s,
+        y:p.y,
+        z:-p.x*s+p.z*c
+    };
+}
+
+
+function project(p) {
+
+    let point = {
+
+        x: p.x + CAMERA.panX,
+        y: p.y + CAMERA.panY,
+        z: p.z + CAMERA.panZ
+
+    };
+
+    point = rotateX(point, CAMERA.rotX);
+    point = rotateY(point, CAMERA.rotY);
+
+    const f = 400 * CAMERA.zoom;
+
+    const z = point.z + 800;
+
+    return {
+
+        x: w / 2 + point.x * f / z,
+        y: h / 2 - point.y * f / z
+
+    };
+
+}
+
+
+function getPlayPosition() {
+
+    if (!playing || !audioBuffer) {
+
+        return {
+            slice: -1,
+            point: -1
+        };
+
+    }
+
+    const elapsed = audioCtx.currentTime - startTime;
+
+    const ratio = Math.min(
+        0.999999,
+        elapsed / audioBuffer.duration
+    );
+
+    const sliceFloat = ratio * SETTINGS.slices;
+
+    const slice = Math.floor(sliceFloat);
+
+    const point = Math.floor(
+        (sliceFloat - slice) *
+        SETTINGS.pointsPerSlice
+    );
+
+    return {
+        slice,
+        point
+    };
+
+}
+
+
+function drawClassic(playPos) {
+
+    //
+    // Draw all slices
+    //
+    for (let s = geometry.length - 1; s >= 0; s--) {
+
+        const row = geometry[s];
+
+        const intensity =
+            Math.max(40, Math.floor(255 - s * 1.5));
+
+        ctx.strokeStyle = `rgb(0,${intensity},0)`;
+        ctx.lineWidth = 1;
+
+        ctx.beginPath();
+
+        for (let i = 0; i < row.length; i++) {
+
+            const p = project({
+                x: row[i].x,
+                y: row[i].y,
+                z: row[i].z
+            });
+
+            if (i === 0)
+                ctx.moveTo(p.x, p.y);
+            else
+                ctx.lineTo(p.x, p.y);
+        }
+
+        ctx.stroke();
+    }
+
+    //
+    // Mesh connectors
+    //
+    ctx.strokeStyle = "#008800";
+
+    for (let s = geometry.length - 2; s >= 0; s--) {
+
+        const row1 = geometry[s];
+        const row2 = geometry[s + 1];
+
+        for (
+            let i = 0;
+            i < row1.length;
+            i += SETTINGS.connectorSpacing
+        ) {
+
+            const p1 = project({
+                x: row1[i].x,
+                y: row1[i].y,
+                z: row1[i].z
+            });
+
+            const p2 = project({
+                x: row2[i].x,
+                y: row2[i].y,
+                z: row2[i].z
+            });
+
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.stroke();
+
+        }
+
+    }
+
+    //
+    // Draw moving play cursor
+    //
+    if (
+        playPos.slice >= 0 &&
+        playPos.slice < geometry.length
+    ) {
+
+        const row = geometry[playPos.slice];
+
+        const start = Math.max(0, playPos.point - 2);
+        const end = Math.min(
+            row.length - 1,
+            playPos.point + 2
+        );
+
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 3;
+
+        ctx.beginPath();
+
+        for (let i = start; i <= end; i++) {
+
+            const p = project({
+                x: row[i].x,
+                y: row[i].y,
+                z: row[i].z
+            });
+
+            if (i === start)
+                ctx.moveTo(p.x, p.y);
+            else
+                ctx.lineTo(p.x, p.y);
+
+        }
+
+        ctx.stroke();
+
+    }
+
+}
+
+
+
+function drawEnvelope(playPos) {
+
+    //
+    // Draw every slice in green
+    //
+    for (let s = geometry.length - 1; s >= 0; s--) {
+
+        const row = geometry[s];
+
+        const intensity = Math.max(
+            25,
+            180 - s
+        );
+
+        ctx.strokeStyle = `rgb(0,${intensity},0)`;
+        ctx.lineWidth = 1;
+
+        //
+        // Upper envelope
+        //
+        ctx.beginPath();
+
+        for (let i = 0; i < row.length; i++) {
+
+            const p = project({
+                x: row[i].x,
+                y: row[i].ymax,
+                z: row[i].z
+            });
+
+            if (i === 0)
+                ctx.moveTo(p.x,p.y);
+            else
+                ctx.lineTo(p.x,p.y);
+
+        }
+
+        ctx.stroke();
+
+        //
+        // Lower envelope
+        //
+        ctx.beginPath();
+
+        for (let i = 0; i < row.length; i++) {
+
+            const p = project({
+                x: row[i].x,
+                y: row[i].ymin,
+                z: row[i].z
+            });
+
+            if (i === 0)
+                ctx.moveTo(p.x,p.y);
+            else
+                ctx.lineTo(p.x,p.y);
+
+        }
+
+        ctx.stroke();
+
+    }
+
+    //
+    // Draw moving play cursor
+    //
+    if (playPos.slice < 0)
+        return;
+
+    const row = geometry[playPos.slice];
+
+    const cursorWidth = 2;
+
+    const start =
+        Math.max(
+            0,
+            playPos.point - cursorWidth
+        );
+
+    const end =
+        Math.min(
+            row.length - 1,
+            playPos.point + cursorWidth
+        );
+
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 3;
+
+    //
+    // Upper cursor
+    //
+    ctx.beginPath();
+
+    for (let i = start; i <= end; i++) {
+
+        const p = project({
+
+            x: row[i].x,
+            y: row[i].ymax,
+            z: row[i].z
+
+        });
+
+        if (i == start)
+            ctx.moveTo(p.x,p.y);
+        else
+            ctx.lineTo(p.x,p.y);
+
+    }
+
+    ctx.stroke();
+
+    //
+    // Lower cursor
+    //
+    ctx.beginPath();
+
+    for (let i = start; i <= end; i++) {
+
+        const p = project({
+
+            x: row[i].x,
+            y: row[i].ymin,
+            z: row[i].z
+
+        });
+
+        if (i == start)
+            ctx.moveTo(p.x,p.y);
+        else
+            ctx.lineTo(p.x,p.y);
+
+    }
+
+    ctx.stroke();
+
+}
+
+
+
+
+
+
+
+
+
+
+function draw() {
+
+    ctx.fillStyle = "black";
+    ctx.fillRect(0,0,w,h);
+
+    const playPos = getPlayPosition();
+
+    if (SETTINGS.displayMode === "classic")
+        drawClassic(playPos);
+    else
+        drawEnvelope(playPos);
+
+    requestAnimationFrame(draw);
+
+}
+
+
+
+
+
+draw();
+
+document.getElementById("playBtn")
+.addEventListener("click",()=>{
+
+    if(!audioBuffer) return;
+
+    if(sourceNode)
+        sourceNode.stop();
+
+    sourceNode=
+        audioCtx.createBufferSource();
+
+    sourceNode.buffer=audioBuffer;
+    sourceNode.connect(audioCtx.destination);
+
+    startTime=audioCtx.currentTime;
+
+    sourceNode.start();
+
+    playing=true;
+
+    sourceNode.onended=()=>{
+        playing=false;
+    };
+});
+
+let dragging = false;
+let dragMode = "rotate";
+
+let lastX = 0;
+let lastY = 0;
+
+
+canvas.addEventListener("mousedown", e => {
+
+    dragging = true;
+
+    lastX = e.clientX;
+    lastY = e.clientY;
+
+    if (e.shiftKey)
+        dragMode = "pan";
+    else
+        dragMode = "rotate";
+
+});
+
+
+window.addEventListener("mouseup", () => {
+
+    dragging = false;
+
+});
+
+
+window.addEventListener("mousemove", e => {
+
+    if (!dragging)
+        return;
+
+    const dx = e.clientX - lastX;
+    const dy = e.clientY - lastY;
+
+    if (dragMode === "rotate") {
+
+        CAMERA.rotY += dx * 0.01;
+        CAMERA.rotX += dy * 0.01;
+
+    }
+    else {
+
+        //
+        // Pan in screen space.
+        //
+
+        CAMERA.panX += dx * 0.8;
+        CAMERA.panY -= dy * 0.8;
+
+    }
+
+    lastX = e.clientX;
+    lastY = e.clientY;
+
+});
+
+
+canvas.addEventListener("wheel", e => {
+
+    e.preventDefault();
+
+    CAMERA.zoom *= (e.deltaY > 0) ? 0.9 : 1.1;
+
+});
+
+
+window.addEventListener("keydown", e=>{
+
+    switch(e.key){
+
+        case "m":
+        case "M":
+
+            SETTINGS.displayMode =
+                SETTINGS.displayMode==="classic"
+                    ? "envelope"
+                    : "classic";
+
+            document.getElementById("modeDisplay").textContent =
+                SETTINGS.displayMode==="classic"
+                    ? "Classic"
+                    : "Envelope";
+
+            break;
+
+        case "[":
+
+            SETTINGS.connectorSpacing =
+                Math.min(32, SETTINGS.connectorSpacing*2);
+
+            break;
+
+        case "]":
+
+            SETTINGS.connectorSpacing =
+                Math.max(
+                    1,
+                    Math.floor(SETTINGS.connectorSpacing/2)
+                );
+
+            break;
+    }
+
+});
+
+window.addEventListener("keydown", e => {
+
+    if (e.key === "r" || e.key === "R") {
+
+        CAMERA.zoom = 1;
+
+        CAMERA.rotX = -0.8;
+        CAMERA.rotY = 0.5;
+
+        CAMERA.panX = 0;
+        CAMERA.panY = 0;
+        CAMERA.panZ = 0;
+
+    }
+
+});
+
+
+
+
+
+</script>
+
+</body>
+</html>
